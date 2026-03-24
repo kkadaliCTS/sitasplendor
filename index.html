@@ -77,6 +77,15 @@ var SHEET_URL="https://script.google.com/macros/s/AKfycbxE-L2HedPXwd9VX5v5LSCKo6
 var syncStatus="syncing";
 var syncTimer=null;
 
+function gasGet(url,cb){
+  var s=document.createElement("script");
+  var cbName="gascb"+Date.now()+Math.random().toString(36).slice(2,6);
+  window[cbName]=function(data){cb(null,data);delete window[cbName];if(s.parentNode)s.parentNode.removeChild(s)};
+  s.onerror=function(){cb(new Error("Network error"));delete window[cbName];if(s.parentNode)s.parentNode.removeChild(s)};
+  s.src=url+(url.indexOf("?")>=0?"&":"?")+"callback="+cbName;
+  document.body.appendChild(s);
+}
+
 function syncToSheet(){
   if(!SHEET_URL){syncStatus="local";return}
   syncStatus="syncing";render();
@@ -86,22 +95,20 @@ function syncToSheet(){
     payments:S.payments.map(function(p){return{id:p.id,date:p.date,flat:p.flat,owner:p.owner,mode:p.mode,amt:p.amt,note:p.note||"",isDue:p.isDue?"yes":""}}),
     config:{openBal:S.openBal,ver:VER,lastSync:new Date().toISOString(),syncBy:TR}
   });
-  fetch(SHEET_URL+"?action=writeAll&data="+encodeURIComponent(payload))
-    .then(function(r){return r.json()})
-    .then(function(d){
-      if(d.success){syncStatus="synced";sv("lastSync",new Date().toISOString())}
-      else{syncStatus="error"}
-      render();
-    })
-    .catch(function(){syncStatus="error";render()});
+  gasGet(SHEET_URL+"?action=writeAll&data="+encodeURIComponent(payload),function(err,d){
+    if(err||!d){syncStatus="error";render();return}
+    if(d.success){syncStatus="synced";sv("lastSync",new Date().toISOString())}
+    else{syncStatus="error"}
+    render();
+  });
 }
 
 function syncFromSheet(cb){
   if(!SHEET_URL){if(cb)cb();return}
   syncStatus="syncing";render();
-  fetch(SHEET_URL+"?action=readAll")
-    .then(function(r){return r.json()})
-    .then(function(d){
+  gasGet(SHEET_URL+"?action=readAll",function(err,d){
+    if(err||!d){syncStatus="error";render();if(cb)cb();return}
+    if(d.error){syncStatus="error";render();if(cb)cb();return}
       if(d.error){syncStatus="error";render();if(cb)cb();return}
       var changed=false;
       if(d.flats&&d.flats.length>0){
