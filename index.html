@@ -52,6 +52,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 @keyframes ti{from{opacity:0;transform:translateX(-50%) translateY(-20px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
 @keyframes to{to{opacity:0;transform:translateX(-50%) translateY(-20px)}}
 .floor-hdr{font-size:11px;font-weight:700;color:var(--bl);padding:8px 14px 4px;text-transform:uppercase;letter-spacing:.5px}
+.sync-dot{display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:4px;vertical-align:middle}
 @media(min-width:500px){.mdl{border-radius:20px;margin:auto}}
 </style>
 </head>
@@ -70,6 +71,75 @@ const uid=()=>Date.now()+""+Math.random().toString(36).slice(2,6);
 const ec=s=>(s||"").replace(/"/g,"&quot;").replace(/</g,"&lt;");
 const sv=(k,v)=>{try{localStorage.setItem("ss_"+k,JSON.stringify(v))}catch(e){}};
 const ld=(k,d)=>{try{const v=localStorage.getItem("ss_"+k);return v?JSON.parse(v):d}catch(e){return d}};
+
+// ===== GOOGLE SHEETS SYNC LAYER =====
+var SHEET_URL="https://script.google.com/macros/s/AKfycbxE-L2HedPXwd9VX5v5LSCKo6HDqSR4c0N1o6vzNiXZaJB1fqskeP0FqxoU2GaPCONS/exec";
+var syncStatus="syncing";
+var syncTimer=null;
+
+function syncToSheet(){
+  if(!SHEET_URL){syncStatus="local";return}
+  syncStatus="syncing";render();
+  var payload=JSON.stringify({
+    flats:S.flats.map(function(f){return{id:f.id,flat:f.flat,owner:f.owner,phone:f.phone,pendingMonths:f.pendingMonths||0,pendingFrom:f.pendingFrom||"",pendingAmt:f.pendingAmt||0}}),
+    expenses:S.expenses.map(function(e){return{id:e.id,date:e.date,desc:e.desc,cat:e.cat,amt:e.amt}}),
+    payments:S.payments.map(function(p){return{id:p.id,date:p.date,flat:p.flat,owner:p.owner,mode:p.mode,amt:p.amt,note:p.note||"",isDue:p.isDue?"yes":""}}),
+    config:{openBal:S.openBal,ver:VER,lastSync:new Date().toISOString(),syncBy:TR}
+  });
+  fetch(SHEET_URL+"?action=writeAll&data="+encodeURIComponent(payload))
+    .then(function(r){return r.json()})
+    .then(function(d){
+      if(d.success){syncStatus="synced";sv("lastSync",new Date().toISOString())}
+      else{syncStatus="error"}
+      render();
+    })
+    .catch(function(){syncStatus="error";render()});
+}
+
+function syncFromSheet(cb){
+  if(!SHEET_URL){if(cb)cb();return}
+  syncStatus="syncing";render();
+  fetch(SHEET_URL+"?action=readAll")
+    .then(function(r){return r.json()})
+    .then(function(d){
+      if(d.error){syncStatus="error";render();if(cb)cb();return}
+      var changed=false;
+      if(d.flats&&d.flats.length>0){
+        S.flats=d.flats.map(function(f){return{id:f.id||uid(),flat:String(f.flat),owner:String(f.owner||""),phone:String(f.phone||""),pendingMonths:Number(f.pendingMonths)||0,pendingFrom:String(f.pendingFrom||""),pendingAmt:Number(f.pendingAmt)||0}});
+        sv("fl",S.flats);changed=true;
+      }
+      if(d.expenses&&d.expenses.length>0){
+        S.expenses=d.expenses.map(function(e){return{id:e.id||uid(),date:String(e.date),desc:String(e.desc),cat:String(e.cat),amt:Number(e.amt)||0}});
+        sv("ex",S.expenses);changed=true;
+      }
+      if(d.payments&&d.payments.length>0){
+        S.payments=d.payments.map(function(p){return{id:p.id||uid(),date:String(p.date),flat:String(p.flat),owner:String(p.owner||""),mode:String(p.mode),amt:Number(p.amt)||0,note:String(p.note||""),isDue:p.isDue==="yes"||p.isDue===true}});
+        sv("py",S.payments);changed=true;
+      }
+      if(d.config&&d.config.openBal!==undefined){
+        S.openBal=Number(d.config.openBal);sv("ob",S.openBal);changed=true;
+      }
+      syncStatus="synced";
+      if(changed)render();
+      if(cb)cb();
+    })
+    .catch(function(){syncStatus="error";render();if(cb)cb()});
+}
+
+function debouncedSync(){
+  if(syncTimer)clearTimeout(syncTimer);
+  syncTimer=setTimeout(syncToSheet,2000);
+}
+
+function initSync(){
+  if(!SHEET_URL)return;
+  var lastSync=ld("lastSync","");
+  if(!lastSync){
+    syncToSheet();
+  }else{
+    syncFromSheet();
+  }
+}
 
 // ===== ALL 35 FLATS WITH OWNER DATA =====
 const FLATS=[
@@ -111,7 +181,6 @@ const FLATS=[
 ];
 const mkFlats=()=>FLATS.map((f,i)=>({id:"f"+i,...f,pendingMonths:f.pm,pendingFrom:f.pf,pendingAmt:f.pa}));
 
-// ===== PRE-LOADED EXPENSES =====
 const EXPS=[
 {date:"2026-02-11",desc:"Cleaning Items",cat:"Maintenance",amt:2030},
 {date:"2026-02-12",desc:"Cleaning Items",cat:"Maintenance",amt:1200},
@@ -142,7 +211,6 @@ const EXPS=[
 ];
 const mkExps=()=>EXPS.map((e,i)=>({id:"ex"+i,...e}));
 
-// ===== PRE-LOADED PAYMENTS =====
 const PAYS=[
 {date:"2026-02-08",flat:"304",owner:"Kadali Kalyan",mode:"UPI",amt:2000,note:"Feb"},
 {date:"2026-02-10",flat:"106",owner:"Chandrahas Reddy",mode:"UPI",amt:2000,note:"Jan"},
@@ -184,408 +252,207 @@ const PAYS=[
 ];
 const mkPays=()=>PAYS.map((p,i)=>({id:"py"+i,...p}));
 
-// ===== LOAD OR INIT =====
-const VER="v7";
-const isNew=ld("ver","")!==VER;
+const VER="v8";
+const prevVer=ld("ver","");
+const hasExistingData=prevVer==="v7"||prevVer==="v6"||prevVer==="v5";
+const isNew=!prevVer;
 let S={
   tab:"home",modal:null,selMonth:td().slice(0,7),
-  openBal:isNew?5000:ld("ob",5000),  // Prasad's register page 3: Cash Balance ₹5,000
+  openBal:isNew?5000:ld("ob",5000),
   flats:isNew?mkFlats():ld("fl",mkFlats()),
   expenses:isNew?mkExps():ld("ex",mkExps()),
   payments:isNew?mkPays():ld("py",mkPays()),
   setupDone:ld("sd",true),ef:{date:td(),desc:"",amt:"",cat:"Salary"},
   pf:{flat:"",date:td(),mode:"UPI",amt:"",note:""},editFlat:null,editExpData:null,editPayData:null,toastMsg:""
 };
-if(isNew){sv("fl",S.flats);sv("ex",S.expenses);sv("py",S.payments);sv("ob",S.openBal);sv("ver",VER);sv("sd",true);}
+if(isNew){sv("fl",S.flats);sv("ex",S.expenses);sv("py",S.payments);sv("ob",S.openBal);sv("sd",true);}
+sv("ver",VER);
 
 function set(u){
   Object.assign(S,typeof u==="function"?u(S):u);
   if("flats"in u)sv("fl",S.flats);if("expenses"in u)sv("ex",S.expenses);
   if("payments"in u)sv("py",S.payments);if("openBal"in u)sv("ob",S.openBal);
   render();
-
-// ===== PWA: Service Worker + Install Prompt =====
-// Register inline service worker for offline support
-if('serviceWorker' in navigator){
-  const swCode=`self.addEventListener('install',e=>{self.skipWaiting()});self.addEventListener('activate',e=>{clients.claim()});self.addEventListener('fetch',e=>{e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request).then(res=>{if(res.ok){const c=res.clone();caches.open('ss-v1').then(cache=>cache.put(e.request,c))}return res}).catch(()=>new Response('Offline')))})`;
-  const swBlob=new Blob([swCode],{type:'application/javascript'});
-  const swUrl=URL.createObjectURL(swBlob);
-  navigator.serviceWorker.register(swUrl).catch(()=>{});
+  if(SHEET_URL&&("flats"in u||"expenses"in u||"payments"in u||"openBal"in u)){
+    debouncedSync();
+  }
 }
 
-// Capture install prompt
+// ===== PWA =====
+if('serviceWorker' in navigator){
+  const swCode="self.addEventListener('install',e=>{self.skipWaiting()});self.addEventListener('activate',e=>{clients.claim()});self.addEventListener('fetch',e=>{e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request).then(res=>{if(res.ok){const c=res.clone();caches.open('ss-v1').then(cache=>cache.put(e.request,c))}return res}).catch(()=>new Response('Offline'))))})";
+  const swBlob=new Blob([swCode],{type:'application/javascript'});
+  navigator.serviceWorker.register(URL.createObjectURL(swBlob)).catch(function(){});
+}
 let deferredPrompt=null;
 window.addEventListener('beforeinstallprompt',function(e){
-  e.preventDefault();
-  deferredPrompt=e;
-  // Show install banner
-  const banner=document.createElement('div');
-  banner.id='install-banner';
+  e.preventDefault();deferredPrompt=e;
+  const banner=document.createElement('div');banner.id='install-banner';
   banner.style.cssText='position:fixed;top:0;left:0;right:0;background:linear-gradient(135deg,#E67E22,#F39C12);color:#fff;padding:12px 16px;z-index:200;display:flex;justify-content:space-between;align-items:center;box-shadow:0 2px 12px rgba(0,0,0,.2)';
   banner.innerHTML='<div style="font-size:13px"><b>📱 Install App!</b><br><span style="font-size:11px;opacity:.9">Home screen లో add చేసుకోండి</span></div><div style="display:flex;gap:8px"><button id="install-yes" style="padding:8px 16px;background:#fff;color:#E67E22;border:none;border-radius:8px;font-weight:700;font-size:13px;cursor:pointer">Install ✅</button><button id="install-no" style="padding:8px 12px;background:rgba(255,255,255,.2);color:#fff;border:none;border-radius:8px;font-size:12px;cursor:pointer">Later</button></div>';
   document.body.prepend(banner);
-  document.getElementById('install-yes').onclick=function(){
-    deferredPrompt.prompt();
-    deferredPrompt.userChoice.then(function(r){
-      if(r.outcome==='accepted')toast('✅ App installed!');
-      banner.remove();deferredPrompt=null;
-    });
-  };
+  document.getElementById('install-yes').onclick=function(){deferredPrompt.prompt();deferredPrompt.userChoice.then(function(r){if(r.outcome==='accepted')toast('✅ App installed!');banner.remove();deferredPrompt=null})};
   document.getElementById('install-no').onclick=function(){banner.remove()};
 });
 
-// Event delegation on document — catches ALL clicks including inside modals
 document.addEventListener("click",function(ev){
-  // Close modal on background tap
-  if(ev.target.classList.contains("mbg")){
-    S.modal=null;S.editFlat=null;S.editExpData=null;S.editPayData=null;render();return;
-  }
-  const btn=ev.target.closest("[data-action]");
-  if(!btn)return;
-  const action=btn.getAttribute("data-action");
-  const id=btn.getAttribute("data-id");
-  if(action==="closemodal"){
-    S.modal=null;S.editFlat=null;S.editExpData=null;S.editPayData=null;render();return;
-  }
-  if(action==="editexp"){
-    const e=S.expenses.find(x=>x.id===id);
-    if(e){S.editExpData={...e};S.modal="editexp";render();}
-  }
-  if(action==="editpay"){
-    const p=S.payments.find(x=>x.id===id);
-    if(p){S.editPayData={...p};S.modal="editpay";render();}
-  }
-  if(action==="delexp"){
-    if(!confirm("Delete this expense?\n(ఈ ఖర్చు delete చేయాలా?)"))return;
-    S.expenses=S.expenses.filter(e=>e.id!==id);
-    sv("ex",S.expenses);render();toast("✅ Deleted","#E74C3C");
-  }
-  if(action==="delpay"){
-    if(!confirm("Delete this payment?\n(ఈ చెల్లింపు delete చేయాలా?)"))return;
-    S.payments=S.payments.filter(p=>p.id!==id);
-    sv("py",S.payments);render();toast("✅ Deleted","#E74C3C");
-  }
-  if(action==="saveeditexp"){
-    const eid=S.editExpData.id;
-    const d=document.getElementById("med").value;
-    const ds=document.getElementById("meds").value.trim();
-    const ct=document.getElementById("mect").value;
-    const a=Number(document.getElementById("mea2").value);
-    if(!ds||!a)return alert("Fill description & amount");
-    S.expenses=S.expenses.map(x=>x.id===eid?{...x,date:d,desc:ds,cat:ct,amt:a}:x);
-    S.modal=null;S.editExpData=null;
-    sv("ex",S.expenses);render();toast("✅ Expense updated");
-  }
-  if(action==="saveeditpay"){
-    const pid=S.editPayData.id;
-    const f=document.getElementById("mef2").value;
-    const a=Number(document.getElementById("mepa").value);
-    const d=document.getElementById("mepd").value;
-    const m=document.getElementById("mepm").value;
-    const n=document.getElementById("mepn").value.trim();
-    if(!f||!a)return alert("Fill flat & amount");
-    const fl=S.flats.find(x=>x.flat===f);
-    S.payments=S.payments.map(x=>x.id===pid?{...x,flat:f,owner:fl?fl.owner:x.owner,date:d,mode:m,amt:a,note:n}:x);
-    S.modal=null;S.editPayData=null;
-    sv("py",S.payments);render();toast("✅ Payment updated");
-  }
+  if(ev.target.classList.contains("mbg")){S.modal=null;S.editFlat=null;S.editExpData=null;S.editPayData=null;render();return}
+  const btn=ev.target.closest("[data-action]");if(!btn)return;
+  const action=btn.getAttribute("data-action"),id=btn.getAttribute("data-id");
+  if(action==="closemodal"){S.modal=null;S.editFlat=null;S.editExpData=null;S.editPayData=null;render();return}
+  if(action==="editexp"){const e=S.expenses.find(x=>x.id===id);if(e){S.editExpData={...e};S.modal="editexp";render()}}
+  if(action==="editpay"){const p=S.payments.find(x=>x.id===id);if(p){S.editPayData={...p};S.modal="editpay";render()}}
+  if(action==="delexp"){if(!confirm("Delete this expense?\n(ఈ ఖర్చు delete చేయాలా?)"))return;S.expenses=S.expenses.filter(e=>e.id!==id);sv("ex",S.expenses);render();toast("✅ Deleted","#E74C3C");debouncedSync()}
+  if(action==="delpay"){if(!confirm("Delete this payment?\n(ఈ చెల్లింపు delete చేయాలా?)"))return;S.payments=S.payments.filter(p=>p.id!==id);sv("py",S.payments);render();toast("✅ Deleted","#E74C3C");debouncedSync()}
+  if(action==="saveeditexp"){const eid=S.editExpData.id;const d=document.getElementById("med").value,ds=document.getElementById("meds").value.trim(),ct=document.getElementById("mect").value,a=Number(document.getElementById("mea2").value);if(!ds||!a)return alert("Fill description & amount");S.expenses=S.expenses.map(x=>x.id===eid?{...x,date:d,desc:ds,cat:ct,amt:a}:x);S.modal=null;S.editExpData=null;sv("ex",S.expenses);render();toast("✅ Expense updated");debouncedSync()}
+  if(action==="saveeditpay"){const pid=S.editPayData.id;const f=document.getElementById("mef2").value,a=Number(document.getElementById("mepa").value),d=document.getElementById("mepd").value,m=document.getElementById("mepm").value,n=document.getElementById("mepn").value.trim();if(!f||!a)return alert("Fill flat & amount");const fl=S.flats.find(x=>x.flat===f);S.payments=S.payments.map(x=>x.id===pid?{...x,flat:f,owner:fl?fl.owner:x.owner,date:d,mode:m,amt:a,note:n}:x);S.modal=null;S.editPayData=null;sv("py",S.payments);render();toast("✅ Payment updated");debouncedSync()}
+  if(action==="pullsheet"){syncFromSheet(function(){toast("✅ Data pulled from Google Sheets")})}
+  if(action==="pushsheet"){syncToSheet();toast("✅ Pushing data to Google Sheets...")}
 });
-}
+
 function toast(m,c){S.toastMsg=m;S.toastColor=c||"#2ecc71";render();setTimeout(()=>{S.toastMsg="";render()},2500)}
 
-// ===== MONTH DATA — Running balance like Prasad's register =====
 function gm(){
   const m=S.selMonth;
-  // Current month's entries
   const mE=S.expenses.filter(e=>e.date?.startsWith(m));
   const mP=S.payments.filter(p=>p.date?.startsWith(m));
   const tE=mE.reduce((a,e)=>a+Number(e.amt),0);
   const tC=mP.reduce((a,p)=>a+Number(p.amt),0);
   const ps=new Set(mP.map(p=>p.flat));
-
-  // Running balance = Opening + ALL payments before & during this month - ALL expenses before & during this month
-  // This matches Prasad's register: Feb closing = March opening
-  const endOfMonth=m+"-31"; // include full month
+  const endOfMonth=m+"-31";
   const allPayTillNow=S.payments.filter(p=>p.date<=endOfMonth).reduce((a,p)=>a+Number(p.amt),0);
   const allExpTillNow=S.expenses.filter(e=>e.date<=endOfMonth).reduce((a,e)=>a+Number(e.amt),0);
   const cl=S.openBal+allPayTillNow-allExpTillNow;
-
-  // Opening balance for THIS month = closing of previous month
   const allPayBeforeMonth=S.payments.filter(p=>p.date<m+"-01").reduce((a,p)=>a+Number(p.amt),0);
   const allExpBeforeMonth=S.expenses.filter(e=>e.date<m+"-01").reduce((a,e)=>a+Number(e.amt),0);
   const monthOpening=S.openBal+allPayBeforeMonth-allExpBeforeMonth;
-
   return{mE,mP,tE,tC,ps,cl,monthOpening};
 }
 
-// ===== INDEPENDENT PAST DUES =====
 function getDues(){
   const list=[];
-  S.flats.forEach(f=>{
-    const pa=Number(f.pendingAmt)||0;
-    if(pa<=0)return;
-    const paid=S.payments.filter(p=>p.flat===f.flat&&p.isDue).reduce((a,p)=>a+Number(p.amt),0);
-    const rem=Math.max(0,pa-paid);
-    if(rem>0)list.push({...f,entered:pa,paid,remaining:rem,months:Number(f.pendingMonths)||0});
-  });
+  S.flats.forEach(f=>{const pa=Number(f.pendingAmt)||0;if(pa<=0)return;const paid=S.payments.filter(p=>p.flat===f.flat&&p.isDue).reduce((a,p)=>a+Number(p.amt),0);const rem=Math.max(0,pa-paid);if(rem>0)list.push({...f,entered:pa,paid,remaining:rem,months:Number(f.pendingMonths)||0})});
   list.sort((a,b)=>b.remaining-a.remaining);
   return{list,total:list.reduce((a,d)=>a+d.remaining,0),totalPaid:list.reduce((a,d)=>a+d.paid,0)};
 }
 
-// ===== XLSX DOWNLOAD =====
 function dlXlsx(type){
-  const{mE,mP,tE,tC,cl,monthOpening}=gm();
-  const mn=MN[+S.selMonth.split("-")[1]-1]+" "+S.selMonth.split("-")[0];
-  const wb=XLSX.utils.book_new();
-
-  if(type==="dues"||type==="all"){
-    const{list,total}=getDues();
-    const data=[[AP+" — PAST DUES REPORT"],["Treasurer: "+TR,"Date: "+fD(td())],[""],
-      ["S.No","Flat","Owner","Phone","Months","Since","Amount"]];
-    list.forEach((f,i)=>{data.push([i+1,f.flat,f.owner,f.phone,f.months+"M",f.pendingFrom||"—",f.remaining])});
-    data.push([]);data.push(["","","","","","TOTAL",total]);
-    const ws=XLSX.utils.aoa_to_sheet(data);
-    ws["!cols"]=[{wch:5},{wch:8},{wch:25},{wch:14},{wch:8},{wch:12},{wch:12}];
-    XLSX.utils.book_append_sheet(wb,ws,"Past Dues");
-  }
-  if(type==="monthly"||type==="all"){
-    const eData=[[AP+" — EXPENSES "+mn],[""],["S.No","Date","Description","Category","Amount"]];
-    mE.forEach((e,i)=>{eData.push([i+1,fD(e.date),e.desc,e.cat,e.amt])});
-    eData.push([]);eData.push(["","","","TOTAL",tE]);
-    const ws2=XLSX.utils.aoa_to_sheet(eData);
-    ws2["!cols"]=[{wch:5},{wch:14},{wch:28},{wch:14},{wch:12}];
-    XLSX.utils.book_append_sheet(wb,ws2,"Expenses "+mn.slice(0,3));
-
-    const pData=[[AP+" — PAYMENTS "+mn],[""],["S.No","Flat","Owner","Date","Amount","Mode","Note"]];
-    mP.forEach((p,i)=>{pData.push([i+1,p.flat,p.owner,fD(p.date),p.amt,p.mode,p.note||""])});
-    pData.push([]);pData.push(["","","","TOTAL",tC]);
-    const ws3=XLSX.utils.aoa_to_sheet(pData);
-    ws3["!cols"]=[{wch:5},{wch:8},{wch:25},{wch:14},{wch:10},{wch:14},{wch:16}];
-    XLSX.utils.book_append_sheet(wb,ws3,"Payments "+mn.slice(0,3));
-
-    const sData=[[AP+" — BALANCE SHEET "+mn],[""],["Item","Amount"],["Opening Balance ("+mn+")",Math.round(monthOpening)],["(+) Collected",tC],["(-) Expenses",tE],[""],["Closing Balance",Math.round(cl)]];
-    const{total:tDue}=getDues();
-    if(tDue>0){sData.push([]);sData.push(["Past Dues Outstanding",tDue])}
-    const ws4=XLSX.utils.aoa_to_sheet(sData);
-    ws4["!cols"]=[{wch:30},{wch:15}];
-    XLSX.utils.book_append_sheet(wb,ws4,"Balance");
-  }
-  const fname=type==="dues"?"SitaSplendor_PastDues":"SitaSplendor_"+S.selMonth;
-  XLSX.writeFile(wb,fname+".xlsx");
-  toast("✅ Excel (.xlsx) downloaded!");
+  const{mE,mP,tE,tC,cl,monthOpening}=gm();const mn=MN[+S.selMonth.split("-")[1]-1]+" "+S.selMonth.split("-")[0];const wb=XLSX.utils.book_new();
+  if(type==="dues"||type==="all"){const{list,total}=getDues();const data=[[AP+" — PAST DUES REPORT"],["Treasurer: "+TR,"Date: "+fD(td())],[""],["S.No","Flat","Owner","Phone","Months","Since","Amount"]];list.forEach((f,i)=>{data.push([i+1,f.flat,f.owner,f.phone,f.months+"M",f.pendingFrom||"—",f.remaining])});data.push([]);data.push(["","","","","","TOTAL",total]);const ws=XLSX.utils.aoa_to_sheet(data);ws["!cols"]=[{wch:5},{wch:8},{wch:25},{wch:14},{wch:8},{wch:12},{wch:12}];XLSX.utils.book_append_sheet(wb,ws,"Past Dues")}
+  if(type==="monthly"||type==="all"){const eData=[[AP+" — EXPENSES "+mn],[""],["S.No","Date","Description","Category","Amount"]];mE.forEach((e,i)=>{eData.push([i+1,fD(e.date),e.desc,e.cat,e.amt])});eData.push([]);eData.push(["","","","TOTAL",tE]);const ws2=XLSX.utils.aoa_to_sheet(eData);ws2["!cols"]=[{wch:5},{wch:14},{wch:28},{wch:14},{wch:12}];XLSX.utils.book_append_sheet(wb,ws2,"Expenses "+mn.slice(0,3));const pData=[[AP+" — PAYMENTS "+mn],[""],["S.No","Flat","Owner","Date","Amount","Mode","Note"]];mP.forEach((p,i)=>{pData.push([i+1,p.flat,p.owner,fD(p.date),p.amt,p.mode,p.note||""])});pData.push([]);pData.push(["","","","TOTAL",tC]);const ws3=XLSX.utils.aoa_to_sheet(pData);ws3["!cols"]=[{wch:5},{wch:8},{wch:25},{wch:14},{wch:10},{wch:14},{wch:16}];XLSX.utils.book_append_sheet(wb,ws3,"Payments "+mn.slice(0,3));const sData=[[AP+" — BALANCE SHEET "+mn],[""],["Item","Amount"],["Opening Balance ("+mn+")",Math.round(monthOpening)],["(+) Collected",tC],["(-) Expenses",tE],[""],["Closing Balance",Math.round(cl)]];const{total:tDue}=getDues();if(tDue>0){sData.push([]);sData.push(["Past Dues Outstanding",tDue])}const ws4=XLSX.utils.aoa_to_sheet(sData);ws4["!cols"]=[{wch:30},{wch:15}];XLSX.utils.book_append_sheet(wb,ws4,"Balance")}
+  XLSX.writeFile(wb,(type==="dues"?"SitaSplendor_PastDues":"SitaSplendor_"+S.selMonth)+".xlsx");toast("✅ Excel downloaded!");
 }
 
-// ===== DUES IMAGE =====
 function dlDuesImg(){
-  const{list,total}=getDues();
-  const W=720,P=24,RH=34,HH=40;
-  const c=document.getElementById("osc"),ctx=c.getContext("2d");
-  const H=76+HH+list.length*RH+RH+50;
-  c.width=W*2;c.height=H*2;ctx.scale(2,2);
-  ctx.fillStyle="#fff";ctx.fillRect(0,0,W,H);
-  const g=ctx.createLinearGradient(0,0,W,0);g.addColorStop(0,"#1F4E79");g.addColorStop(1,"#2E75B6");
-  ctx.fillStyle=g;ctx.fillRect(0,0,W,62);
-  ctx.fillStyle="#fff";ctx.font="bold 17px -apple-system,sans-serif";ctx.fillText("PAST DUES — "+AP,P,26);
-  ctx.font="11px -apple-system,sans-serif";ctx.fillStyle="rgba(255,255,255,.85)";ctx.fillText("Treasurer: "+TR+" | "+fD(td())+" | "+fm(MT)+"/flat/month",P,44);
-  let y=72;
-  const cols=["No","Flat","Owner","Phone","Months","Since","Amount"],cw=[32,46,165,90,50,105,108];
-  ctx.fillStyle="#C0392B";ctx.fillRect(P,y,W-P*2,HH);
-  ctx.fillStyle="#fff";ctx.font="bold 11px -apple-system,sans-serif";
-  let tx=P+6;cols.forEach((c2,i)=>{ctx.fillText(c2,tx,y+HH/2+4);tx+=cw[i]});y+=HH;
-  ctx.font="12px -apple-system,sans-serif";
-  list.forEach((f,ri)=>{
-    const row=[(ri+1)+"",f.flat,f.owner||"—",f.phone||"—",f.months+"M",f.pendingFrom||"—",fm(f.remaining)];
-    ctx.fillStyle=ri%2===0?"#fff":"#FFF5F5";ctx.fillRect(P,y,W-P*2,RH);
-    ctx.strokeStyle="#e8e8e8";ctx.lineWidth=.5;ctx.beginPath();ctx.moveTo(P,y+RH);ctx.lineTo(W-P,y+RH);ctx.stroke();
-    tx=P+6;
-    row.forEach((cell,ci)=>{
-      if(ci===6){ctx.fillStyle="#9C0006";ctx.font="bold 12px -apple-system,sans-serif";ctx.fillText(cell,tx+cw[ci]-ctx.measureText(cell).width-8,y+RH/2+4);ctx.font="12px -apple-system,sans-serif";}
-      else if(ci===1){ctx.fillStyle="#C00";ctx.font="bold 12px -apple-system,sans-serif";ctx.fillText(cell,tx,y+RH/2+4);ctx.font="12px -apple-system,sans-serif";}
-      else{ctx.fillStyle="#333";ctx.fillText(cell,tx,y+RH/2+4)}tx+=cw[ci];
-    });y+=RH;
-  });
-  y+=4;ctx.fillStyle="#FFC7CE";ctx.fillRect(P,y,W-P*2,RH+2);
-  ctx.fillStyle="#9C0006";ctx.font="bold 13px -apple-system,sans-serif";ctx.fillText("TOTAL PENDING ("+list.length+" flats)",P+6,y+RH/2+4);
-  const ta=fm(total);ctx.font="bold 15px -apple-system,sans-serif";ctx.fillText(ta,W-P-ctx.measureText(ta).width-8,y+RH/2+4);
-  y+=RH+10;ctx.fillStyle="#aaa";ctx.font="10px -apple-system,sans-serif";ctx.fillText(AP+" | "+TR+" | "+fD(td()),P,y+8);
-  c.toBlob(b=>{
-    if(navigator.share&&navigator.canShare){const f=new File([b],"PastDues.png",{type:"image/png"});if(navigator.canShare({files:[f]})){navigator.share({files:[f]}).catch(()=>{});return}}
-    const a=document.createElement("a");a.href=URL.createObjectURL(b);a.download="SitaSplendor_PastDues.png";a.click();toast("✅ Image saved!")
-  },"image/png");
+  const{list,total}=getDues();const W=720,P=24,RH=34,HH=40;const c=document.getElementById("osc"),ctx=c.getContext("2d");const H=76+HH+list.length*RH+RH+50;c.width=W*2;c.height=H*2;ctx.scale(2,2);ctx.fillStyle="#fff";ctx.fillRect(0,0,W,H);const g=ctx.createLinearGradient(0,0,W,0);g.addColorStop(0,"#1F4E79");g.addColorStop(1,"#2E75B6");ctx.fillStyle=g;ctx.fillRect(0,0,W,62);ctx.fillStyle="#fff";ctx.font="bold 17px -apple-system,sans-serif";ctx.fillText("PAST DUES — "+AP,P,26);ctx.font="11px -apple-system,sans-serif";ctx.fillStyle="rgba(255,255,255,.85)";ctx.fillText("Treasurer: "+TR+" | "+fD(td())+" | "+fm(MT)+"/flat/month",P,44);let y=72;const cols=["No","Flat","Owner","Phone","Months","Since","Amount"],cw=[32,46,165,90,50,105,108];ctx.fillStyle="#C0392B";ctx.fillRect(P,y,W-P*2,HH);ctx.fillStyle="#fff";ctx.font="bold 11px -apple-system,sans-serif";let tx=P+6;cols.forEach((c2,i)=>{ctx.fillText(c2,tx,y+HH/2+4);tx+=cw[i]});y+=HH;ctx.font="12px -apple-system,sans-serif";
+  list.forEach((f,ri)=>{const row=[(ri+1)+"",f.flat,f.owner||"—",f.phone||"—",f.months+"M",f.pendingFrom||"—",fm(f.remaining)];ctx.fillStyle=ri%2===0?"#fff":"#FFF5F5";ctx.fillRect(P,y,W-P*2,RH);ctx.strokeStyle="#e8e8e8";ctx.lineWidth=.5;ctx.beginPath();ctx.moveTo(P,y+RH);ctx.lineTo(W-P,y+RH);ctx.stroke();tx=P+6;row.forEach((cell,ci)=>{if(ci===6){ctx.fillStyle="#9C0006";ctx.font="bold 12px -apple-system,sans-serif";ctx.fillText(cell,tx+cw[ci]-ctx.measureText(cell).width-8,y+RH/2+4);ctx.font="12px -apple-system,sans-serif"}else if(ci===1){ctx.fillStyle="#C00";ctx.font="bold 12px -apple-system,sans-serif";ctx.fillText(cell,tx,y+RH/2+4);ctx.font="12px -apple-system,sans-serif"}else{ctx.fillStyle="#333";ctx.fillText(cell,tx,y+RH/2+4)}tx+=cw[ci]});y+=RH});
+  y+=4;ctx.fillStyle="#FFC7CE";ctx.fillRect(P,y,W-P*2,RH+2);ctx.fillStyle="#9C0006";ctx.font="bold 13px -apple-system,sans-serif";ctx.fillText("TOTAL PENDING ("+list.length+" flats)",P+6,y+RH/2+4);const ta=fm(total);ctx.font="bold 15px -apple-system,sans-serif";ctx.fillText(ta,W-P-ctx.measureText(ta).width-8,y+RH/2+4);y+=RH+10;ctx.fillStyle="#aaa";ctx.font="10px -apple-system,sans-serif";ctx.fillText(AP+" | "+TR+" | "+fD(td()),P,y+8);
+  c.toBlob(b=>{if(navigator.share&&navigator.canShare){const f=new File([b],"PastDues.png",{type:"image/png"});if(navigator.canShare({files:[f]})){navigator.share({files:[f]}).catch(()=>{});return}}const a=document.createElement("a");a.href=URL.createObjectURL(b);a.download="SitaSplendor_PastDues.png";a.click();toast("✅ Image saved!")},"image/png");
 }
 
-// ===== WHATSAPP =====
-function shareDuesWA(){
-  const{list,total}=getDues();
-  let t="🏠 *"+AP+"*\n📌 *PAST DUES*\n👤 "+TR+" | "+fD(td())+"\n━━━━━━━━━━━━━━━━━\n\n";
-  list.forEach((f,i)=>{t+=(i+1)+". *"+f.flat+"* – "+(f.owner||"")+" – "+fm(f.remaining)+" ("+f.months+"M"+(f.pendingFrom?" since "+f.pendingFrom:"")+") \n"});
-  t+="\n🔴 *Total: "+fm(total)+"* ("+list.length+" flats)\n\n📱 Pay "+fm(MT)+"/month\n🏠 "+AP;
-  window.open("https://wa.me/?text="+encodeURIComponent(t),"_blank");
-}
+function shareDuesWA(){const{list,total}=getDues();let t="🏠 *"+AP+"*\n📌 *PAST DUES*\n👤 "+TR+" | "+fD(td())+"\n━━━━━━━━━━━━━━━━━\n\n";list.forEach((f,i)=>{t+=(i+1)+". *"+f.flat+"* – "+(f.owner||"")+" – "+fm(f.remaining)+" ("+f.months+"M"+(f.pendingFrom?" since "+f.pendingFrom:"")+") \n"});t+="\n🔴 *Total: "+fm(total)+"* ("+list.length+" flats)\n\n📱 Pay "+fm(MT)+"/month\n🏠 "+AP;window.open("https://wa.me/?text="+encodeURIComponent(t),"_blank")}
 
-function shareMonthWA(){
-  const{mE,mP,tE,tC,cl,monthOpening}=gm();const mn=MN[+S.selMonth.split("-")[1]-1]+" "+S.selMonth.split("-")[0];
-  let t="🏠 *"+AP+"*\n📋 *"+mn+"*\n👤 "+TR+"\n━━━━━━━━━━━━━━━━━\n\n💰 *BALANCE*\nOpening: "+fm(Math.round(monthOpening))+"\n(+) Collected: "+fm(tC)+"\n(-) Expenses: "+fm(tE)+"\n*Closing: "+fm(Math.round(cl))+"*\n\n";
-  if(mP.length){t+="✅ *PAID*\n";mP.forEach((p,i)=>{t+=(i+1)+". "+p.flat+" – "+(p.owner||"")+" "+fm(p.amt)+" ("+p.mode+")\n"});t+="*Total: "+fm(tC)+"*\n\n"}
-  if(mE.length){t+="💸 *EXPENSES*\n";mE.forEach((e,i)=>{t+=(i+1)+". "+e.desc+" "+fm(e.amt)+"\n"});t+="*Total: "+fm(tE)+"*\n"}
-  t+="\n🏠 "+AP;
-  window.open("https://wa.me/?text="+encodeURIComponent(t),"_blank");
-}
+function shareMonthWA(){const{mE,mP,tE,tC,cl,monthOpening}=gm();const mn=MN[+S.selMonth.split("-")[1]-1]+" "+S.selMonth.split("-")[0];let t="🏠 *"+AP+"*\n📋 *"+mn+"*\n👤 "+TR+"\n━━━━━━━━━━━━━━━━━\n\n💰 *BALANCE*\nOpening: "+fm(Math.round(monthOpening))+"\n(+) Collected: "+fm(tC)+"\n(-) Expenses: "+fm(tE)+"\n*Closing: "+fm(Math.round(cl))+"*\n\n";if(mP.length){t+="✅ *PAID*\n";mP.forEach((p,i)=>{t+=(i+1)+". "+p.flat+" – "+(p.owner||"")+" "+fm(p.amt)+" ("+p.mode+")\n"});t+="*Total: "+fm(tC)+"*\n\n"}if(mE.length){t+="💸 *EXPENSES*\n";mE.forEach((e,i)=>{t+=(i+1)+". "+e.desc+" "+fm(e.amt)+"\n"});t+="*Total: "+fm(tE)+"*\n"}t+="\n🏠 "+AP;window.open("https://wa.me/?text="+encodeURIComponent(t),"_blank")}
 
-// ===== HELPERS =====
 function fd(l,inp){return'<div class="fd"><label>'+l+'</label>'+inp+'</div>'}
 function ml(t,hint,b){return'<div class="mbg"><div class="mdl"><h3>'+t+'<button class="x" data-action="closemodal">✕</button></h3>'+(hint?'<div class="mh">'+hint+'</div>':'')+b+'</div></div>'}
 
-// ===== RENDER =====
 function render(){
   const{mE,mP,tE,tC,ps,cl,monthOpening}=gm();
   const{list:dueList,total:dueTotal}=getDues();
   const mn=MN[+S.selMonth.split("-")[1]-1]+" "+S.selMonth.split("-")[0];
   let h="";
-
   if(S.toastMsg)h+='<div class="toast" style="background:'+(S.toastColor||"#2ecc71")+'">'+S.toastMsg+'</div>';
 
-  // Header
-  h+='<div class="hd"><h1>🏠 '+AP+'</h1><div class="sub">Treasurer: <b>'+TR+'</b> | '+fm(MT)+'/flat</div>';
+  h+='<div class="hd"><div style="display:flex;justify-content:space-between;align-items:center"><h1>🏠 '+AP+'</h1>';
+  if(SHEET_URL){
+    var dotColor=syncStatus==="synced"?"#2ecc71":syncStatus==="syncing"?"#F39C12":"#E74C3C";
+    var dotText=syncStatus==="synced"?"Synced":syncStatus==="syncing"?"Syncing...":"Retry";
+    h+='<span style="font-size:10px;opacity:.9;cursor:pointer" onclick="initSync()"><span class="sync-dot" style="background:'+dotColor+'"></span>'+dotText+'</span>';
+  }
+  h+='</div><div class="sub">Treasurer: <b>'+TR+'</b> | '+fm(MT)+'/flat</div>';
   h+='<div class="mbar"><input type="month" value="'+S.selMonth+'" onchange="set({selMonth:this.value})"></div></div>';
 
-  // Summary
-  h+='<div class="summary">';
-  h+='<div class="sc" style="background:#D6E4F0"><div class="sl">Opening</div><div class="sv" style="color:#1F4E79">'+fm(Math.round(cl-tC+tE))+'</div></div>';
-  h+='<div class="sc" style="background:#C6EFCE"><div class="sl">Collected</div><div class="sv" style="color:#006100">'+fm(tC)+'</div></div>';
-  h+='<div class="sc" style="background:#FFEB9C"><div class="sl">Balance</div><div class="sv" style="color:#9C5700">'+fm(Math.round(cl))+'</div></div></div>';
-
+  h+='<div class="summary"><div class="sc" style="background:#D6E4F0"><div class="sl">Opening</div><div class="sv" style="color:#1F4E79">'+fm(Math.round(cl-tC+tE))+'</div></div><div class="sc" style="background:#C6EFCE"><div class="sl">Collected</div><div class="sv" style="color:#006100">'+fm(tC)+'</div></div><div class="sc" style="background:#FFEB9C"><div class="sl">Balance</div><div class="sv" style="color:#9C5700">'+fm(Math.round(cl))+'</div></div></div>';
   h+='<div class="ct">';
 
-  // ===== HOME =====
   if(S.tab==="home"){
     h+='<button class="bigbtn" style="background:#E74C3C" onclick="set({modal:\'exp\'})">💸 Add Expense <span class="ht">(ఖర్చు)</span></button>';
     h+='<button class="bigbtn" style="background:var(--gn)" onclick="set({modal:\'pay\'})">✅ Record Payment <span class="ht">(చెల్లింపు)</span></button>';
-    h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px">';
-    h+='<button class="sbtn" style="background:var(--bl);width:100%;padding:10px" onclick="set({modal:\'bal\'})">✏ Opening Bal</button>';
-    h+='<button class="sbtn" style="background:#25D366;width:100%;padding:10px" onclick="shareMonthWA()">📱 WhatsApp</button></div>';
-
+    h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px"><button class="sbtn" style="background:var(--bl);width:100%;padding:10px" onclick="set({modal:\'bal\'})">✏ Opening Bal</button><button class="sbtn" style="background:#25D366;width:100%;padding:10px" onclick="shareMonthWA()">📱 WhatsApp</button></div>';
     if(dueTotal>0)h+='<div style="background:#FFF0F0;border:1px solid #fcc;border-radius:10px;padding:10px 14px;font-size:12px;margin-bottom:8px"><b style="color:#C00">📌 Past Dues: '+fm(dueTotal)+'</b> ('+dueList.length+' flats) — tap Dues tab</div>';
-
     h+='<div style="font-size:11px;font-weight:700;color:#888;margin:10px 0 6px">RECENT — '+mn+'</div>';
     const recent=[...mE.map(e=>({t:"e",d:e.date,...e})),...mP.map(p=>({t:"p",d:p.date,...p}))].sort((a,b)=>b.d.localeCompare(a.d));
     if(!recent.length)h+='<div class="ety">No activity. Tap buttons above to start!</div>';
-    recent.slice(0,8).forEach(r=>{
-      if(r.t==="e")h+='<div class="lc"><div class="lr"><div class="mn"><div class="tt">'+ec(r.desc)+'</div><div class="sb">'+fD(r.d)+' <span class="pl" style="background:#FFEB9C;color:#9C5700">'+r.cat+'</span></div></div><div class="am" style="color:#9C0006">-'+fm(r.amt)+'</div></div></div>';
-      else h+='<div class="lc"><div class="lr"><div class="mn"><div class="tt"><b>'+ec(r.flat)+'</b> – '+ec(r.owner||"")+'</div><div class="sb">'+fD(r.d)+' <span class="pl" style="background:#E3F2FD;color:#1565C0">'+r.mode+'</span> '+(r.note?ec(r.note):'')+'</div></div><div class="am" style="color:#006100">+'+fm(r.amt)+'</div></div></div>';
-    });
-    h+='<div style="margin-top:12px;display:grid;grid-template-columns:1fr 1fr;gap:6px">';
-    h+='<button class="sbtn" style="background:var(--gn);width:100%;padding:10px" onclick="dlXlsx(\'all\')">⬇ Excel (.xlsx)</button>';
-    h+='<button class="sbtn" style="background:#555;width:100%;padding:10px" onclick="set({modal:\'backup\'})">💾 Save/Load</button></div>';
+    recent.slice(0,8).forEach(r=>{if(r.t==="e")h+='<div class="lc"><div class="lr"><div class="mn"><div class="tt">'+ec(r.desc)+'</div><div class="sb">'+fD(r.d)+' <span class="pl" style="background:#FFEB9C;color:#9C5700">'+r.cat+'</span></div></div><div class="am" style="color:#9C0006">-'+fm(r.amt)+'</div></div></div>';else h+='<div class="lc"><div class="lr"><div class="mn"><div class="tt"><b>'+ec(r.flat)+'</b> – '+ec(r.owner||"")+'</div><div class="sb">'+fD(r.d)+' <span class="pl" style="background:#E3F2FD;color:#1565C0">'+r.mode+'</span> '+(r.note?ec(r.note):'')+'</div></div><div class="am" style="color:#006100">+'+fm(r.amt)+'</div></div></div>'});
+    h+='<div style="margin-top:12px;display:grid;grid-template-columns:1fr 1fr;gap:6px"><button class="sbtn" style="background:var(--gn);width:100%;padding:10px" onclick="dlXlsx(\'all\')">⬇ Excel (.xlsx)</button><button class="sbtn" style="background:#555;width:100%;padding:10px" onclick="set({modal:\'backup\'})">💾 Save/Load/Sync</button></div>';
   }
 
-  // ===== DUES (Independent) =====
   if(S.tab==="dues"){
     h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><h2 style="font-size:15px;font-weight:700;color:#C00">📌 Past Dues</h2><span style="font-weight:700;color:#C00">'+fm(dueTotal)+'</span></div>';
     h+='<p style="font-size:10px;color:#888;margin-bottom:8px">Independent section — balance/expenses కి సంబంధం లేదు</p>';
-    h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px">';
-    h+='<button class="bigbtn" style="background:var(--or);margin:0;font-size:13px;padding:11px" onclick="set({modal:\'due\'})">+ Enter Dues <span class="ht">(బకాయి)</span></button>';
-    h+='<button class="bigbtn" style="background:#9C0006;margin:0;font-size:13px;padding:11px" onclick="dlXlsx(\'dues\')">⬇ Excel (.xlsx)</button></div>';
-    h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px">';
-    h+='<button class="sbtn" style="background:#25D366;width:100%" onclick="shareDuesWA()">📱 WhatsApp</button>';
-    h+='<button class="sbtn" style="background:#C00;width:100%" onclick="dlDuesImg()">📸 Screenshot</button></div>';
-
+    h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px"><button class="bigbtn" style="background:var(--or);margin:0;font-size:13px;padding:11px" onclick="set({modal:\'due\'})">+ Enter Dues <span class="ht">(బకాయి)</span></button><button class="bigbtn" style="background:#9C0006;margin:0;font-size:13px;padding:11px" onclick="dlXlsx(\'dues\')">⬇ Excel (.xlsx)</button></div>';
+    h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px"><button class="sbtn" style="background:#25D366;width:100%" onclick="shareDuesWA()">📱 WhatsApp</button><button class="sbtn" style="background:#C00;width:100%" onclick="dlDuesImg()">📸 Screenshot</button></div>';
     if(!dueList.length)h+='<div class="ety">No past dues. Tap "+ Enter Dues"</div>';
-    dueList.forEach((f,i)=>{
-      h+='<div class="lc"><div class="lr"><div class="mn"><div class="tt"><b style="color:#C00">'+(i+1)+'. '+ec(f.flat)+'</b> – '+ec(f.owner||"")+'</div><div class="sb">';
-      h+=f.months+'M'+(f.pendingFrom?' since '+ec(f.pendingFrom):'');
-      if(f.phone)h+=' | 📞 '+ec(f.phone);
-      h+='</div></div><div class="am" style="color:#C00">'+fm(f.remaining)+'</div></div></div>';
-    });
+    dueList.forEach((f,i)=>{h+='<div class="lc"><div class="lr"><div class="mn"><div class="tt"><b style="color:#C00">'+(i+1)+'. '+ec(f.flat)+'</b> – '+ec(f.owner||"")+'</div><div class="sb">'+f.months+'M'+(f.pendingFrom?' since '+ec(f.pendingFrom):'')+''+(f.phone?' | 📞 '+ec(f.phone):'')+'</div></div><div class="am" style="color:#C00">'+fm(f.remaining)+'</div></div></div>'});
     if(dueTotal)h+='<div class="tot" style="background:#FFC7CE"><span>Total ('+dueList.length+' flats)</span><span style="color:#9C0006">'+fm(dueTotal)+'</span></div>';
   }
 
-  // ===== FLATS =====
   if(S.tab==="flats"){
-    h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><h2 style="font-size:15px;font-weight:700">🏠 Flats ('+S.flats.length+')</h2><div>';
-    h+='<button class="sbtn" style="background:var(--bl);margin-right:4px" onclick="set({modal:\'addflat\'})">+ Add</button>';
-    h+='<button class="sbtn" style="background:var(--or)" onclick="set({modal:\'due\'})">+ Dues</button></div></div>';
-    for(let fl=1;fl<=5;fl++){
-      const ff=S.flats.filter(f=>Math.floor(parseInt(f.flat)/100)===fl);
-      if(!ff.length)continue;
-      h+='<div class="floor-hdr">Floor '+fl+' ('+ff.length+')</div>';
-      ff.forEach(f=>{
-        const pa=Number(f.pendingAmt)||0;
-        h+='<div class="lc"><div class="lr"><div class="mn"><div class="tt"><b>'+ec(f.flat)+'</b> – '+ec(f.owner||"(Tap ✏)")+'</div><div class="sb">'+(f.phone||"No phone")+' ';
-        if(pa>0)h+='<span class="pl" style="background:#FFC7CE;color:#9C0006">Due: '+fm(pa)+' ('+f.pendingMonths+'M)</span>';
-        else h+='<span class="pl" style="background:#C6EFCE;color:#006100">Clear</span>';
-        h+='</div></div><button class="del" style="color:var(--bl2);font-size:13px" onclick="eF(\''+f.id+'\')">✏</button></div></div>';
-      });
-    }
+    h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><h2 style="font-size:15px;font-weight:700">🏠 Flats ('+S.flats.length+')</h2><div><button class="sbtn" style="background:var(--bl);margin-right:4px" onclick="set({modal:\'addflat\'})">+ Add</button><button class="sbtn" style="background:var(--or);margin-right:4px" onclick="set({modal:\'due\'})">+ Dues</button><button class="sbtn" style="background:#8E44AD" onclick="restoreMissing()">Restore</button></div></div>';
+    if(S.flats.length<35)h+='<div style="background:#FFF3E0;border:1px solid #FFD54F;border-radius:10px;padding:8px 12px;font-size:11px;color:#E65100;margin-bottom:8px">⚠ '+(35-S.flats.length)+' flat(s) missing! Tap <b>Restore</b> to add them back.</div>';
+    for(let fl=1;fl<=5;fl++){const ff=S.flats.filter(f=>Math.floor(parseInt(f.flat)/100)===fl);if(!ff.length)continue;h+='<div class="floor-hdr">Floor '+fl+' ('+ff.length+')</div>';ff.forEach(f=>{const pa=Number(f.pendingAmt)||0;h+='<div class="lc"><div class="lr"><div class="mn"><div class="tt"><b>'+ec(f.flat)+'</b> – '+ec(f.owner||"(Tap ✏)")+'</div><div class="sb">'+(f.phone||"No phone")+' ';if(pa>0)h+='<span class="pl" style="background:#FFC7CE;color:#9C0006">Due: '+fm(pa)+' ('+f.pendingMonths+'M)</span>';else h+='<span class="pl" style="background:#C6EFCE;color:#006100">Clear</span>';h+='</div></div><button class="del" style="color:var(--bl2);font-size:13px" onclick="eF(\''+f.id+'\')">✏</button></div></div>'})}
   }
 
-  // ===== REPORT =====
   if(S.tab==="report"){
-    h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><h2 style="font-size:15px;font-weight:700">📊 '+mn+'</h2><div>';
-    h+='<button class="sbtn" style="background:var(--gn);margin-right:4px" onclick="dlXlsx(\'all\')">⬇ Excel</button>';
-    h+='<button class="sbtn" style="background:#25D366" onclick="shareMonthWA()">📱</button></div></div>';
-
-    h+='<div class="lc" style="padding:14px"><div style="display:flex;justify-content:space-between;margin-bottom:6px"><span>Opening Balance ('+mn+')</span><b style="color:#1F4E79">'+fm(Math.round(monthOpening))+'</b></div>';
-    h+='<div style="display:flex;justify-content:space-between;margin-bottom:6px"><span>(+) Collected ('+mP.length+' payments)</span><b style="color:#006100">'+fm(tC)+'</b></div>';
-    h+='<div style="display:flex;justify-content:space-between;margin-bottom:6px"><span>(-) Expenses ('+mE.length+' items)</span><b style="color:#9C0006">'+fm(tE)+'</b></div>';
-    h+='<div style="display:flex;justify-content:space-between;padding-top:8px;border-top:2px solid #1F4E79"><span style="font-weight:700;font-size:15px">Closing Balance</span><b style="color:#1F4E79;font-size:18px">'+fm(Math.round(cl))+'</b></div></div>';
-
+    h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><h2 style="font-size:15px;font-weight:700">📊 '+mn+'</h2><div><button class="sbtn" style="background:var(--gn);margin-right:4px" onclick="dlXlsx(\'all\')">⬇ Excel</button><button class="sbtn" style="background:#25D366" onclick="shareMonthWA()">📱</button></div></div>';
+    h+='<div class="lc" style="padding:14px"><div style="display:flex;justify-content:space-between;margin-bottom:6px"><span>Opening Balance ('+mn+')</span><b style="color:#1F4E79">'+fm(Math.round(monthOpening))+'</b></div><div style="display:flex;justify-content:space-between;margin-bottom:6px"><span>(+) Collected ('+mP.length+' payments)</span><b style="color:#006100">'+fm(tC)+'</b></div><div style="display:flex;justify-content:space-between;margin-bottom:6px"><span>(-) Expenses ('+mE.length+' items)</span><b style="color:#9C0006">'+fm(tE)+'</b></div><div style="display:flex;justify-content:space-between;padding-top:8px;border-top:2px solid #1F4E79"><span style="font-weight:700;font-size:15px">Closing Balance</span><b style="color:#1F4E79;font-size:18px">'+fm(Math.round(cl))+'</b></div></div>';
     h+='<div style="font-size:11px;font-weight:700;color:#888;margin:12px 0 6px">PAYMENTS ('+mP.length+') — Total: '+fm(tC)+'</div>';
     if(!mP.length)h+='<div class="ety">No payments this month</div>';
     mP.forEach((p,i)=>{h+='<div class="lc"><div class="lr"><div class="mn"><div class="tt"><b>'+ec(p.flat)+'</b> – '+ec(p.owner||"")+'</div><div class="sb">'+fD(p.date)+' | '+p.mode+(p.note?' | '+ec(p.note):'')+' | '+fm(p.amt)+'</div></div><div style="display:flex;gap:4px;flex-shrink:0"><button class="del" style="color:var(--bl2)" data-action="editpay" data-id="'+p.id+'">✏</button><button class="del" data-action="delpay" data-id="'+p.id+'">✕</button></div></div></div>'});
-
     h+='<div style="font-size:11px;font-weight:700;color:#888;margin:12px 0 6px">EXPENSES ('+mE.length+') — Total: '+fm(tE)+'</div>';
     if(!mE.length)h+='<div class="ety">No expenses this month</div>';
     mE.forEach((e,i)=>{h+='<div class="lc"><div class="lr"><div class="mn"><div class="tt">'+ec(e.desc)+'</div><div class="sb">'+fD(e.date)+' | '+e.cat+' | '+fm(e.amt)+'</div></div><div style="display:flex;gap:4px;flex-shrink:0"><button class="del" style="color:var(--bl2)" data-action="editexp" data-id="'+e.id+'">✏</button><button class="del" data-action="delexp" data-id="'+e.id+'">✕</button></div></div></div>'});
   }
-
   h+='</div>';
 
-  // Tabs
   h+='<div class="tabs">';
-  [["home","🏠","Home"],["dues","📌","Dues"],["flats","📋","Flats"],["report","📊","Report"]].forEach(t=>{
-    h+='<button class="tb'+(S.tab===t[0]?' on':'')+'" onclick="set({tab:\''+t[0]+'\'})"><span class="i">'+t[1]+'</span>'+t[2];
-    if(t[0]==="dues"&&dueList.length)h+='<span class="badge" style="background:#E67E22">'+dueList.length+'</span>';
-    h+='</button>';
-  });h+='</div>';
+  [["home","🏠","Home"],["dues","📌","Dues"],["flats","📋","Flats"],["report","📊","Report"]].forEach(t=>{h+='<button class="tb'+(S.tab===t[0]?' on':'')+'" onclick="set({tab:\''+t[0]+'\'})"><span class="i">'+t[1]+'</span>'+t[2];if(t[0]==="dues"&&dueList.length)h+='<span class="badge" style="background:#E67E22">'+dueList.length+'</span>';h+='</button>'});
+  h+='</div>';
 
-  // ===== MODALS =====
   if(S.modal==="exp")h+=ml("💸 Add Expense","ఖర్చు వివరాలు",fd("Date","<input type='date' id='md' value='"+S.ef.date+"'>")+fd("Description","<input id='mds' placeholder='e.g. Security Salary'>")+fd("Category","<select id='mct'>"+CATS.map(c=>"<option>"+c+"</option>").join("")+"</select>")+fd("Amount (₹)","<input type='number' id='ma' placeholder='10000' inputmode='numeric'>")+'<button class="sub-btn" style="background:#E74C3C" onclick="sE()">Add ✅</button>');
-  if(S.modal==="pay"){
-    let pb=fd("Flat","<select id='mf'><option value=''>— Select —</option>"+S.flats.map(f=>"<option value='"+f.flat+"'>"+f.flat+" – "+(f.owner||"")+"</option>").join("")+"</select>");
-    pb+=fd("Amount (₹)","<input type='number' id='mpa' value='"+MT+"' inputmode='numeric'>")+fd("Date","<input type='date' id='mpd' value='"+S.pf.date+"'>")+fd("Mode","<select id='mpm'>"+MDS.map(m=>"<option>"+m+"</option>").join("")+"</select>")+fd("Note","<input id='mpn' placeholder='e.g. Jan Feb'>");
-    pb+='<button class="sub-btn" style="background:var(--gn)" onclick="sP()">Record ✅</button>';
-    h+=ml("✅ Record Payment","చెల్లింపు నమోదు",pb);
-  }
+  if(S.modal==="pay"){let pb=fd("Flat","<select id='mf'><option value=''>— Select —</option>"+S.flats.map(f=>"<option value='"+f.flat+"'>"+f.flat+" – "+(f.owner||"")+"</option>").join("")+"</select>");pb+=fd("Amount (₹)","<input type='number' id='mpa' value='"+MT+"' inputmode='numeric'>")+fd("Date","<input type='date' id='mpd' value='"+S.pf.date+"'>")+fd("Mode","<select id='mpm'>"+MDS.map(m=>"<option>"+m+"</option>").join("")+"</select>")+fd("Note","<input id='mpn' placeholder='e.g. Jan Feb'>");pb+='<button class="sub-btn" style="background:var(--gn)" onclick="sP()">Record ✅</button>';h+=ml("✅ Record Payment","చెల్లింపు నమోదు",pb)}
   if(S.modal==="due")h+=ml("📌 Enter Past Dues","Handover pending — independent section",fd("Flat","<select id='mdf'><option value=''>— Select —</option>"+S.flats.map(f=>"<option value='"+f.flat+"'>"+f.flat+" – "+(f.owner||"")+"</option>").join("")+"</select>")+fd("Months Pending","<input type='number' id='mdm' placeholder='e.g. 3' inputmode='numeric'>")+fd("From Month","<input id='mdfm' placeholder='e.g. Oct 2025'>")+fd("Amount (₹)","<input type='number' id='mda' placeholder='Auto = months × "+MT+"' inputmode='numeric'>")+'<button class="sub-btn" style="background:var(--or)" onclick="sD()">Save ✅</button>');
   if(S.modal==="bal")h+=ml("✏ Opening Balance","ప్రారంభ బ్యాలెన్స్",fd("Amount (₹)","<input type='number' id='mb' value='"+S.openBal+"' inputmode='numeric'>")+'<button class="sub-btn" style="background:#8E44AD" onclick="sB()">Save ✅</button>');
   if(S.modal==="addflat")h+=ml("🏠 Add Flat","",fd("Flat No","<input id='mfn' placeholder='601' inputmode='numeric'>")+fd("Owner","<input id='mfo' placeholder='Name'>")+fd("Phone","<input id='mfp' placeholder='9876543210' inputmode='numeric'>")+'<button class="sub-btn" style="background:var(--bl)" onclick="sF()">Add ✅</button>');
-  if(S.modal==="editflat"&&S.editFlat){const ef=S.editFlat;h+=ml("✏ Flat "+ef.flat,"",fd("Owner","<input id='meo' value='"+ec(ef.owner)+"'>")+fd("Phone","<input id='mep' value='"+ec(ef.phone)+"' inputmode='numeric'>")+fd("Past Due Months","<input type='number' id='mem' value='"+(ef.pendingMonths||0)+"' inputmode='numeric'>")+fd("Since","<input id='mef' value='"+ec(ef.pendingFrom||"")+"'>")+fd("Past Due Amount","<input type='number' id='mea' value='"+(ef.pendingAmt||0)+"' inputmode='numeric'>")+'<button class="sub-btn" style="background:var(--bl)" onclick="sEF()">Save ✅</button><button class="sub-btn" style="background:#C00;margin-top:6px" onclick="delF(\''+ef.id+'\')">🗑 Delete</button>')}
-  if(S.modal==="backup")h+=ml("💾 Save / Load","App update చేసినప్పుడు data safe",'<button class="sub-btn" style="background:var(--bl)" onclick="bkp()">⬇ Save My Data</button><button class="sub-btn" style="background:var(--or);margin-top:8px" onclick="document.getElementById(\'rf\').click()">⬆ Load My Data</button><input type="file" id="rf" accept=".json" style="display:none" onchange="rst(this)">');
-  if(S.modal==="editexp"){
-    const e=S.editExpData||{};
-    h+=ml("✏ Edit Expense","ఖర్చు మార్చండి",
-      fd("Date","<input type='date' id='med' value='"+(e.date||"")+"'>")+
-      fd("Description","<input id='meds' value='"+ec(e.desc)+"'>")+
-      fd("Category","<select id='mect'>"+CATS.map(c=>"<option"+(c===e.cat?" selected":"")+">"+c+"</option>").join("")+"</select>")+
-      fd("Amount (₹)","<input type='number' id='mea2' value='"+(e.amt||"")+"' inputmode='numeric'>")+
-      '<button class="sub-btn" style="background:var(--bl)" data-action="saveeditexp">Save ✅</button>');
-  }
-  if(S.modal==="editpay"){
-    const p=S.editPayData||{};
-    h+=ml("✏ Edit Payment","చెల్లింపు మార్చండి",
-      fd("Flat","<select id='mef2'>"+S.flats.map(f=>"<option value='"+f.flat+"'"+(f.flat===p.flat?" selected":"")+">"+f.flat+" – "+(f.owner||"")+"</option>").join("")+"</select>")+
-      fd("Amount (₹)","<input type='number' id='mepa' value='"+(p.amt||"")+"' inputmode='numeric'>")+
-      fd("Date","<input type='date' id='mepd' value='"+(p.date||"")+"'>")+
-      fd("Mode","<select id='mepm'>"+MDS.map(m=>"<option"+(m===p.mode?" selected":"")+">"+m+"</option>").join("")+"</select>")+
-      fd("Note","<input id='mepn' value='"+ec(p.note||"")+"'>")+
-      '<button class="sub-btn" style="background:var(--gn)" data-action="saveeditpay">Save ✅</button>');
+  if(S.modal==="editflat"&&S.editFlat){const ef=S.editFlat;h+=ml("✏ Flat "+ef.flat,"ఫ్లాట్ వివరాలు మార్చండి",fd("Owner Name","<input id='meo' value='"+ec(ef.owner)+"' placeholder='Enter owner name'>")+fd("Phone","<input id='mep' value='"+ec(ef.phone)+"' inputmode='numeric' placeholder='9876543210'>")+
+    '<div style="border-top:1px solid #eee;padding-top:12px;margin-top:4px;margin-bottom:12px"><div style="font-size:12px;font-weight:600;color:#E67E22;margin-bottom:8px">Past Dues (బకాయి)</div></div>'+
+    fd("Months Pending","<input type='number' id='mem' value='"+(ef.pendingMonths||0)+"' inputmode='numeric'>")+fd("Since","<input id='mef' value='"+ec(ef.pendingFrom||"")+"' placeholder='e.g. Oct 2025'>")+fd("Amount (₹)","<input type='number' id='mea' value='"+(ef.pendingAmt||0)+"' inputmode='numeric'>")+
+    '<button class="sub-btn" style="background:var(--bl)" onclick="sEF()">Save ✅</button>'+
+    ((Number(ef.pendingAmt)>0)?'<button class="sub-btn" style="background:#E67E22;margin-top:6px" onclick="clearDues(\''+ef.id+'\')">Clear Past Dues Only</button>':'')+
+    '<button class="sub-btn" style="background:#999;margin-top:6px" onclick="delF(\''+ef.id+'\')">🗑 Delete Flat</button>')}
+  if(S.modal==="editexp"){const e=S.editExpData||{};h+=ml("✏ Edit Expense","ఖర్చు మార్చండి",fd("Date","<input type='date' id='med' value='"+(e.date||"")+"'>")+fd("Description","<input id='meds' value='"+ec(e.desc)+"'>")+fd("Category","<select id='mect'>"+CATS.map(c=>"<option"+(c===e.cat?" selected":"")+">"+c+"</option>").join("")+"</select>")+fd("Amount (₹)","<input type='number' id='mea2' value='"+(e.amt||"")+"' inputmode='numeric'>")+'<button class="sub-btn" style="background:var(--bl)" data-action="saveeditexp">Save ✅</button>')}
+  if(S.modal==="editpay"){const p=S.editPayData||{};h+=ml("✏ Edit Payment","చెల్లింపు మార్చండి",fd("Flat","<select id='mef2'>"+S.flats.map(f=>"<option value='"+f.flat+"'"+(f.flat===p.flat?" selected":"")+">"+f.flat+" – "+(f.owner||"")+"</option>").join("")+"</select>")+fd("Amount (₹)","<input type='number' id='mepa' value='"+(p.amt||"")+"' inputmode='numeric'>")+fd("Date","<input type='date' id='mepd' value='"+(p.date||"")+"'>")+fd("Mode","<select id='mepm'>"+MDS.map(m=>"<option"+(m===p.mode?" selected":"")+">"+m+"</option>").join("")+"</select>")+fd("Note","<input id='mepn' value='"+ec(p.note||"")+"'>")+'<button class="sub-btn" style="background:var(--gn)" data-action="saveeditpay">Save ✅</button>')}
+  if(S.modal==="backup"){
+    var syncBody='<div style="border-bottom:1px solid #eee;padding-bottom:14px;margin-bottom:14px">';
+    syncBody+='<div style="font-size:14px;font-weight:700;color:var(--bl);margin-bottom:8px">☁️ Google Sheets Sync</div>';
+    var dotColor=syncStatus==="synced"?"#27AE60":syncStatus==="syncing"?"#F39C12":"#E74C3C";
+    var dotText=syncStatus==="synced"?"Connected & synced":syncStatus==="syncing"?"Syncing...":"Connection error";
+    syncBody+='<div style="background:'+(syncStatus==="synced"?"#E8F5E9":syncStatus==="syncing"?"#FFF3E0":"#FFF0F0")+';border-radius:10px;padding:10px 14px;font-size:12px;margin-bottom:10px"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:'+dotColor+';margin-right:6px;vertical-align:middle"></span><b>'+dotText+'</b><br><span style="font-size:10px;color:#888">Data auto-syncs — you & Prasad same data</span></div>';
+    syncBody+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px">';
+    syncBody+='<button class="sbtn" style="background:var(--gn);width:100%;padding:10px" data-action="pullsheet">⬇ Pull Latest</button>';
+    syncBody+='<button class="sbtn" style="background:var(--bl);width:100%;padding:10px" data-action="pushsheet">⬆ Push My Data</button></div>';
+    syncBody+='</div>';
+    syncBody+='<div style="font-size:14px;font-weight:700;color:#555;margin-bottom:8px">💾 Local Backup</div>';
+    syncBody+='<button class="sub-btn" style="background:var(--bl)" onclick="bkp()">⬇ Save My Data</button>';
+    syncBody+='<button class="sub-btn" style="background:var(--or);margin-top:8px" onclick="document.getElementById(\'rf\').click()">⬆ Load My Data</button>';
+    syncBody+='<input type="file" id="rf" accept=".json" style="display:none" onchange="rst(this)">';
+    h+=ml("💾 Save / Load / Sync","Data safe గా ఉంచండి",syncBody);
   }
 
   document.getElementById("app").innerHTML=h;
 }
 
-// ===== ACTIONS =====
 window.sE=function(){const d=document.getElementById("md").value,ds=document.getElementById("mds").value.trim(),ct=document.getElementById("mct").value,a=document.getElementById("ma").value;if(!ds||!a)return alert("Fill description & amount");S.expenses.push({id:uid(),date:d,desc:ds,cat:ct,amt:Number(a)});set({expenses:[...S.expenses],modal:null});toast("✅ Expense: "+fm(a))};
 window.sP=function(){const f=document.getElementById("mf").value,a=Number(document.getElementById("mpa").value),d=document.getElementById("mpd").value,m=document.getElementById("mpm").value,n=document.getElementById("mpn").value.trim();if(!f||!a)return alert("Select flat & amount");const fl=S.flats.find(x=>x.flat===f);S.payments.push({id:uid(),flat:f,owner:fl?fl.owner:"",date:d,mode:m,amt:a,note:n});set({payments:[...S.payments],modal:null,pf:{flat:"",date:td(),mode:"UPI",amt:"",note:""}});toast("✅ Payment: "+f+" "+fm(a))};
 window.sD=function(){const f=document.getElementById("mdf").value,m=Number(document.getElementById("mdm").value),fr=document.getElementById("mdfm").value.trim();let a=Number(document.getElementById("mda").value);if(!f||!m)return alert("Select flat & months");if(!a)a=m*MT;S.flats=S.flats.map(x=>x.flat===f?{...x,pendingMonths:m,pendingFrom:fr,pendingAmt:a}:x);set({flats:[...S.flats],modal:null});toast("✅ "+f+": "+m+"M = "+fm(a))};
@@ -593,11 +460,14 @@ window.sB=function(){set({openBal:Number(document.getElementById("mb").value),mo
 window.sF=function(){const f=document.getElementById("mfn").value.trim(),o=document.getElementById("mfo").value.trim(),p=document.getElementById("mfp").value.trim();if(!f)return alert("Enter flat no");if(S.flats.find(x=>x.flat===f))return alert("Exists!");S.flats.push({id:uid(),flat:f,owner:o,phone:p,pendingMonths:0,pendingFrom:"",pendingAmt:0});set({flats:[...S.flats],modal:null});toast("✅ Flat "+f+" added")};
 window.sEF=function(){const ef=S.editFlat;const o=document.getElementById("meo").value.trim(),p=document.getElementById("mep").value.trim(),m=Number(document.getElementById("mem").value),fr=document.getElementById("mef").value.trim(),a=Number(document.getElementById("mea").value);S.flats=S.flats.map(f=>f.id===ef.id?{...f,owner:o,phone:p,pendingMonths:m,pendingFrom:fr,pendingAmt:a}:f);S.payments=S.payments.map(pm=>pm.flat===ef.flat?{...pm,owner:o}:pm);set({flats:[...S.flats],payments:[...S.payments],modal:null,editFlat:null});toast("✅ "+ef.flat+" updated")};
 window.eF=function(id){const f=S.flats.find(x=>x.id===id);if(f)set({editFlat:{...f},modal:"editflat"})};
-window.delF=function(id){if(confirm("Delete?"))set({flats:S.flats.filter(f=>f.id!==id),modal:null,editFlat:null})};
+window.delF=function(id){if(!confirm("⚠ WARNING: This deletes the ENTIRE FLAT permanently!\n\nTo clear only past dues, use 'Clear Past Dues Only' button instead.\n\n(ఈ ఫ్లాట్ completely delete అవుతుంది!)\n\nAre you sure?"))return;if(!confirm("FINAL CONFIRMATION: Really delete this flat?\n(నిజంగా delete చేయాలా?)"))return;set({flats:S.flats.filter(f=>f.id!==id),modal:null,editFlat:null});toast("Flat deleted","#E74C3C")};
+window.clearDues=function(id){S.flats=S.flats.map(f=>f.id===id?{...f,pendingMonths:0,pendingFrom:"",pendingAmt:0}:f);set({flats:[...S.flats],modal:null,editFlat:null});toast("✅ Past dues cleared!")};
+window.restoreMissing=function(){var existing=new Set(S.flats.map(f=>f.flat));var added=0;FLATS.forEach(function(f,i){if(!existing.has(f.flat)){S.flats.push({id:"f"+i+"r"+uid(),flat:f.flat,owner:f.owner,phone:f.phone,pendingMonths:0,pendingFrom:"",pendingAmt:0});added++}});if(added>0){set({flats:[...S.flats]});toast("✅ "+added+" flat(s) restored!")}else{toast("All 35 flats already present")}};
 window.bkp=function(){const d={v:3,ob:S.openBal,fl:S.flats,ex:S.expenses,py:S.payments};const b=new Blob([JSON.stringify(d)],{type:"application/json"});const a=document.createElement("a");a.href=URL.createObjectURL(b);a.download="SitaSplendor_Backup_"+td()+".json";a.click();toast("✅ Backup saved!")};
-window.rst=function(inp){const f=inp.files[0];if(!f)return;const r=new FileReader();r.onload=function(e){try{const d=JSON.parse(e.target.result);if(d.fl){S.flats=d.fl;S.expenses=d.ex||[];S.payments=d.py||[];if(d.ob!==undefined)S.openBal=d.ob;sv("fl",S.flats);sv("ex",S.expenses);sv("py",S.payments);sv("ob",S.openBal);toast("✅ Data restored!");render();}else alert("Wrong file")}catch(er){alert("Cannot read file")}};r.readAsText(f);inp.value=""};
+window.rst=function(inp){const f=inp.files[0];if(!f)return;const r=new FileReader();r.onload=function(e){try{const d=JSON.parse(e.target.result);if(d.fl){S.flats=d.fl;S.expenses=d.ex||[];S.payments=d.py||[];if(d.ob!==undefined)S.openBal=d.ob;sv("fl",S.flats);sv("ex",S.expenses);sv("py",S.payments);sv("ob",S.openBal);toast("✅ Data restored!");render();debouncedSync()}else alert("Wrong file")}catch(er){alert("Cannot read file")}};r.readAsText(f);inp.value=""};
 
 render();
+initSync();
 </script>
 </body>
 </html>
